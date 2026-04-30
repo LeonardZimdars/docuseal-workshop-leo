@@ -2,11 +2,10 @@ name: Build Docker Images
 
 on:
   workflow_dispatch:
-  # TODO: Ensure the workflow runs after the "CI" workflow completed
-  # workflow_run:
-  #   workflows: ["CI"]
-  #   types: [completed]
-  #   branches: [workshop]
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [workshop]
 
 jobs:
   build:
@@ -17,4 +16,13 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platforms }}
+          push: true
+          outputs: type=image,name=target,annotation-index.org.opencontainers.image.description=My multi-arch image
       # TODO: Add the remaining steps to build and push the docker image to ghcr
