@@ -1,25 +1,54 @@
-name: Update Services
+Goal: Automatically provision a Hetzner server and deploy your application to it via GitHub workflows
 
-on:
-  # TODO: change to run after the docker images are built
-  workflow_dispatch:
-  # workflow_run:
-  #   workflows: ["Build Docker Images"]
-  #   types: [completed]
-  #   branches: [workshop]
+#### Prerequisites:
 
-jobs:
-  update:
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+- [Generate Hetzner API Key](https://www.notion.so/Generate-Hetzner-API-Key-351d95c7799980d2ae37e52dfb294710?pvs=21)
+- [SSH Key Generation](https://www.notion.so/SSH-Key-Generation-351d95c7799980419984d776d1b92ec2?pvs=21)
+- [Generate Terraform User Token](https://www.notion.so/Generate-Terraform-User-Token-351d95c77999806b9d5cdead9a987ff6?pvs=21)
 
+## 1. Add Secrets and Environment Variables to GitHub
+
+To see how to add secrets and environment variables to GitHub:
+
+[GitHub Environment Configuration](https://www.notion.so/GitHub-Environment-Configuration-351d95c7799980d69b08d2d01fc27b05?pvs=21)
+
+### Add the following variables:
+
+As secrets:
+
+```bash
+HCLOUD_TOKEN=<your-token>
+SSH_PRIVATE_KEY=<your-private-key>
+TF_TOKEN=<your-token>
+ANSIBLE_VAULT_PASSWORD=test
+```
+
+As environment variable:
+
+```bash
+SSH_PUBLIC_KEY=<your-public-key>
+```
+
+<aside>
+💡
+
+- The value for `ANSIBLE_VAULT_PASSWORD` is `test`
+- Don’t mix up your **private** and **public** SSH key
+</aside>
+
+## 2. Construct the `provision-infrastructure.yml` Workflow
+
+1.  Install the Terraform CLI on the runner.
+
+```yaml
       - name: Setup Terraform
         uses: hashicorp/setup-terraform@v3
+```
 
-      - name: Terraform Init
+1. Runs terraform `init` and `apply`:
+
+```yaml
+      - name: Terraform Init & Apply
         working-directory: infrastructure/terraform
         env:
           TF_VAR_hcloud_token: ${{ secrets.HCLOUD_TOKEN }}
@@ -27,43 +56,221 @@ jobs:
           TF_TOKEN_app_terraform_io: ${{ secrets.TF_TOKEN }}
         run: |
           terraform init
+          terraform apply -auto-approve
+```
 
+3. Read the new server's IP from Terraform and store it as `TARGET_HOST` :
+
+```yaml
       - name: Export Terraform outputs
         working-directory: infrastructure/terraform
         env:
           TF_TOKEN_app_terraform_io: ${{ secrets.TF_TOKEN }}
         run: |
           echo "TARGET_HOST=$(terraform output -raw csee_server_ip)" >> $GITHUB_ENV
+```
 
+1. Install Ansible via pip so the playbook can be executed:
+
+```yaml
       - name: Install Ansible
         run: |
           python3 -m pip install --upgrade pip
           pip install ansible
+```
 
+1. Writes the private key from GitHub Secrets to a temp file:
+
+```yaml
       - name: Prepare SSH key
         run: |
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > /tmp/key.pem
           chmod 600 /tmp/key.pem
+```
 
+1. Store the Ansible Vault password (`test`) in a locked file so encrypted variables in the playbook can be decrypted:
+
+```yaml
       - name: Write vault password file
         run: |
           mkdir -p ~/.ansible
           printf '%s' '${{ secrets.ANSIBLE_VAULT_PASSWORD }}' > ~/.ansible/.vault_pass
           chmod 600 ~/.ansible/.vault_pass
+```
 
+1. Run the bootstrap playbook
+
+```yaml
       - name: Run Ansible
         run: |
           ansible-playbook \
-          -i "$TARGET_HOST," \
-          -u root \
-          --private-key /tmp/key.pem \
-          infrastructure/ansible/deploy.yml \
-          --vault-password-file ~/.ansible/.vault_pass \
-          -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'" \
-          -e "target_host=all" \
-          -e "repo_url=${{ github.server_url }}/${{ github.repository }}.git" \
-          -e "host=${TARGET_HOST}.nip.io"
+            -i "$TARGET_HOST," \
+            -u root \
+            --private-key /tmp/key.pem \
+            infrastructure/ansible/bootstrap.yml \
+            --vault-password-file ~/.ansible/.vault_pass \
+            -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'" \
+            -e "target_host=all" \
+            -e "repo_url=${{ github.server_url }}/${{ github.repository }}.git" \
+            -e "host=${TARGET_HOST}.nip.io"
+```
 
+1.  Delete the vault password file from the runner:
+
+```yaml
       - name: Cleanup
         if: always()
         run: rm -f ~/.ansible/.vault_pass
+```
+
+## 3. Fix TODO in `update-services.yml`
+
+This workflow is responsible for pulling the latest images and restarting the services on your server after your images are rebuilt when you push a change. 
+
+## 4. Push your changes
+
+1. Push the changes you made to `provision-infrastructure.yml` and `update-service.yml` 
+2. Go into your GitHub Actions and watch the workflow pass
+3. Make sure your app is live under `https://<your-server-ip>.nip.io`
+
+# Solution
+
+- Solution: `provision-infrastructure.yml`
+    
+    ```yaml
+    name: Provision Infrastructure
+    on:
+      workflow_dispatch:
+        
+    jobs:
+      deploy:
+        runs-on: ubuntu-latest
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v6
+    
+          - name: Setup Terraform
+            uses: hashicorp/setup-terraform@v3
+    
+          - name: Terraform Init & Apply
+            working-directory: infrastructure/terraform
+            env:
+              TF_VAR_hcloud_token: ${{ secrets.HCLOUD_TOKEN }}
+              TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
+              TF_TOKEN_app_terraform_io: ${{ secrets.TF_TOKEN }}
+            run: |
+              terraform init
+              terraform apply -auto-approve
+    
+          - name: Export Terraform outputs
+            working-directory: infrastructure/terraform
+            env:
+              TF_TOKEN_app_terraform_io: ${{ secrets.TF_TOKEN }}
+            run: |
+              echo "TARGET_HOST=$(terraform output -raw csee_server_ip)" >> $GITHUB_ENV
+    
+          - name: Install Ansible
+            run: |
+              python3 -m pip install --upgrade pip
+              pip install ansible
+    
+          - name: Prepare SSH key
+            run: |
+              echo "${{ secrets.SSH_PRIVATE_KEY }}" > /tmp/key.pem
+              chmod 600 /tmp/key.pem
+    
+          - name: Write vault password file
+            run: |
+              mkdir -p ~/.ansible
+              printf '%s' '${{ secrets.ANSIBLE_VAULT_PASSWORD }}' > ~/.ansible/.vault_pass
+              chmod 600 ~/.ansible/.vault_pass
+    
+          - name: Run Ansible
+            run: |
+              ansible-playbook \
+              -i "$TARGET_HOST," \
+              -u root \
+              --private-key /tmp/key.pem \
+              infrastructure/ansible/bootstrap.yml \
+              --vault-password-file ~/.ansible/.vault_pass \
+              -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'" \
+              -e "target_host=all" \
+              -e "repo_url=${{ github.server_url }}/${{ github.repository }}.git" \
+              -e "host=${TARGET_HOST}.nip.io"
+    
+          - name: Cleanup
+            if: always()
+            run: rm -f ~/.ansible/.vault_pass
+    ```
+    
+- Solution: `update-services.yml`
+    
+    ```yaml
+    name: Update Services
+    
+    on:
+      workflow_run:
+        workflows: ["Build Docker Images"]
+        types: [completed]
+        branches: [workshop]
+    
+    jobs:
+      update:
+        if: ${{ github.event.workflow_run.conclusion == 'success' }}
+        runs-on: ubuntu-latest
+        steps:
+          - name: Checkout
+            uses: actions/checkout@v6
+    
+          - name: Setup Terraform
+            uses: hashicorp/setup-terraform@v3
+    
+          - name: Terraform Init
+            working-directory: infrastructure/terraform
+            env:
+              TF_VAR_hcloud_token: ${{ secrets.HCLOUD_TOKEN }}
+              TF_VAR_ssh_public_key: ${{ vars.SSH_PUBLIC_KEY }}
+              TF_TOKEN_app_terraform_io: ${{ secrets.TF_TOKEN }}
+            run: |
+              terraform init
+    
+          - name: Export Terraform outputs
+            working-directory: infrastructure/terraform
+            env:
+              TF_TOKEN_app_terraform_io: ${{ secrets.TF_TOKEN }}
+            run: |
+              echo "TARGET_HOST=$(terraform output -raw csee_server_ip)" >> $GITHUB_ENV
+    
+          - name: Install Ansible
+            run: |
+              python3 -m pip install --upgrade pip
+              pip install ansible
+    
+          - name: Prepare SSH key
+            run: |
+              echo "${{ secrets.SSH_PRIVATE_KEY }}" > /tmp/key.pem
+              chmod 600 /tmp/key.pem
+    
+          - name: Write vault password file
+            run: |
+              mkdir -p ~/.ansible
+              printf '%s' '${{ secrets.ANSIBLE_VAULT_PASSWORD }}' > ~/.ansible/.vault_pass
+              chmod 600 ~/.ansible/.vault_pass
+    
+          - name: Run Ansible
+            run: |
+              ansible-playbook \
+              -i "$TARGET_HOST," \
+              -u root \
+              --private-key /tmp/key.pem \
+              infrastructure/ansible/deploy.yml \
+              --vault-password-file ~/.ansible/.vault_pass \
+              -e "ansible_ssh_common_args='-o StrictHostKeyChecking=no'" \
+              -e "target_host=all" \
+              -e "repo_url=${{ github.server_url }}/${{ github.repository }}.git" \
+              -e "host=${TARGET_HOST}.nip.io"
+    
+          - name: Cleanup
+            if: always()
+            run: rm -f ~/.ansible/.vault_pass
+    ```
